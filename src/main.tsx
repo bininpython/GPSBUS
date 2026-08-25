@@ -1,15 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { supabase, type BusLocation } from './lib/supabase'
+import { driverAuthEmail, isSupabaseConfigured, supabase } from './lib/supabase'
+import { distanceInMeters, formatDistance, formatSpeed, OPEN_FREE_MAP_STYLE, toCoordinate } from './lib/location'
+import type { BusLocation, BusTrip, Coordinate, DriverProfile, Role, Screen } from './types'
 import './styles.css'
 
-type Role = 'driver' | 'passenger'
-type Screen = 'home' | 'auth' | 'map'
-type AuthMode = 'signin' | 'signup'
-
-const DRIVER_LOCATION_ID = '00000000-0000-0000-0000-000000000001'
+const DEFAULT_CENTER: Coordinate = [-42.64, -19.58]
+const MAX_ROUTE_POINTS = 3_000
 
 function ChevronIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
@@ -38,7 +37,6 @@ function BusScene() {
         <path d="M22 216h376M46 216l-34 34m89-34-56 35m274-35 56 35m-56-35 89 34M210 207v49" />
         <path d="M34 216v-59h27v59m0-92h26v92m0-45h31v45m-9-93h30v93m142 0v-86h35v86m0-57h31v57m0-31h26v31" />
         <path d="M57 93c4-12 23-13 29-2 11-5 24 1 25 12H48c0-5 3-8 9-10Zm271 14c4-12 23-13 29-2 11-5 24 1 25 12h-63c0-5 3-8 9-10Z" />
-        <path d="M97 216v-18m-8 0c0-8 3-15 8-15s8 7 8 15-3 11-8 11m232 7v-18m-8 0c0-8 3-15 8-15s8 7 8 15-3 11-8 11" />
         <ellipse cx="210" cy="90" rx="42" ry="10" />
       </g>
       <g className="scene-dark" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
@@ -61,179 +59,401 @@ function RoleIcon({ role }: { role: Role }) {
   return <span className="role-icon">{role === 'driver' ? <DriverIcon /> : <PassengerIcon />}</span>
 }
 
+function routeGeoJson(coordinates: Coordinate[]) {
+  const safeCoordinates: Coordinate[] = coordinates.length === 0
+    ? [DEFAULT_CENTER, DEFAULT_CENTER]
+    : coordinates.length === 1
+      ? [coordinates[0], coordinates[0]]
+      : coordinates
+  return {
+    type: 'Feature' as const,
+    properties: {},
+    geometry: { type: 'LineString' as const, coordinates: safeCoordinates },
+  }
+}
+
+function getPosition() {
+  return new Promise<GeolocationPosition>((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 20_000,
+      maximumAge: 0,
+    })
+  })
+}
+
 function App() {
   const [screen, setScreen] = useState<Screen>('home')
-  const [role, setRole] = useState<Role>('passenger')
-  const [authMode, setAuthMode] = useState<AuthMode>('signin')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [driverCode, setDriverCode] = useState('')
+  const [driverProfile, setDriverProfile] = useState<DriverProfile | null>(null)
+  const [activeTrip, setActiveTrip] = useState<BusTrip | null>(null)
+  const [routeLocations, setRouteLocations] = useState<BusLocation[]>([])
+  const [driverOnline, setDriverOnline] = useState(false)
+  const [passengerGpsActive, setPassengerGpsActive] = useState(false)
+  const [passengerPosition, setPassengerPosition] = useState<Coordinate | null>(null)
+  const [followBus, setFollowBus] = useState(true)
+  const [mapLoaded, setMapLoaded] = useState(false)
   const [message, setMessage] = useState('')
-  const [bus, setBus] = useState<BusLocation | null>(null)
-  const [sharing, setSharing] = useState(false)
+  const [busy, setBusy] = useState(false)
+
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<maplibregl.Map | null>(null)
-  const userMarker = useRef<maplibregl.Marker | null>(null)
   const busMarker = useRef<maplibregl.Marker | null>(null)
-  const watchId = useRef<number | null>(null)
+  const passengerMarker = useRef<maplibregl.Marker | null>(null)
+  const geolocationWatch = useRef<number | null>(null)
+  const activeTripRef = useRef<BusTrip | null>(null)
+  const lastSentAt = useRef(0)
+  const lastSentPosition = useRef<Coordinate | null>(null)
+
+  const latestLocation = routeLocations.length ? routeLocations[routeLocations.length - 1] : null
+  const latestCoordinate = latestLocation ? toCoordinate(latestLocation) : null
+  const passengerDistance = useMemo(() => {
+    if (!passengerPosition || !latestCoordinate) return null
+    return distanceInMeters(passengerPosition, latestCoordinate)
+  }, [passengerPosition, latestCoordinate])
 
   useEffect(() => {
-    if (screen !== 'map' || !mapContainer.current || map.current) return
-    map.current = new maplibregl.Map({
+    activeTripRef.current = activeTrip
+  }, [activeTrip])
+
+  useEffect(() => {
+    const isMapScreen = screen === 'driver-map' || screen === 'passenger-map'
+    if (!isMapScreen || !mapContainer.current || map.current) return
+
+    const mapInstance = new maplibregl.Map({
       container: mapContainer.current,
-      style: 'https://demotiles.maplibre.org/style.json',
-      center: [-42.64, -19.58],
+      style: OPEN_FREE_MAP_STYLE,
+      center: DEFAULT_CENTER,
       zoom: 13,
-      attributionControl: false,
+      attributionControl: { compact: true },
     })
-    map.current.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
+    map.current = mapInstance
+    mapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
+
+    const handleLoad = () => {
+      mapInstance.addSource('bus-route', { type: 'geojson', data: routeGeoJson([]) })
+      mapInstance.addLayer({
+        id: 'bus-route-outline',
+        type: 'line',
+        source: 'bus-route',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': .95 },
+      })
+      mapInstance.addLayer({
+        id: 'bus-route-line',
+        type: 'line',
+        source: 'bus-route',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#111111', 'line-width': 5, 'line-opacity': .92 },
+      })
+      setMapLoaded(true)
+    }
+    const handleManualMove = () => {
+      if (screen === 'passenger-map') setFollowBus(false)
+    }
+    mapInstance.on('load', handleLoad)
+    mapInstance.on('dragstart', handleManualMove)
+
     return () => {
-      map.current?.remove()
+      mapInstance.off('load', handleLoad)
+      mapInstance.off('dragstart', handleManualMove)
+      mapInstance.remove()
       map.current = null
+      busMarker.current = null
+      passengerMarker.current = null
+      setMapLoaded(false)
     }
   }, [screen])
 
   useEffect(() => {
-    if (screen !== 'map') return
-    const channel = supabase
-      .channel('bus-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bus_locations' }, payload => {
-        const location = payload.new as BusLocation
-        setBus(location.is_active ? location : null)
-      })
-      .subscribe()
-
-    supabase
-      .from('bus_locations')
-      .select('*')
-      .eq('is_active', true)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-      .then(({ data }) => setBus(data))
-
-    return () => { void supabase.removeChannel(channel) }
-  }, [screen])
+    if (!mapLoaded || !map.current) return
+    const coordinates = routeLocations.map(toCoordinate)
+    const source = map.current.getSource('bus-route') as maplibregl.GeoJSONSource | undefined
+    void source?.setData(routeGeoJson(coordinates))
+  }, [mapLoaded, routeLocations])
 
   useEffect(() => {
     const currentMap = map.current
-    if (!bus || !currentMap) {
+    if (!currentMap || !latestLocation) {
       busMarker.current?.remove()
       busMarker.current = null
       return
     }
+    const coordinate = toCoordinate(latestLocation)
     if (!busMarker.current) {
-      const marker = document.createElement('div')
-      marker.className = 'bus-marker'
-      marker.textContent = 'BUS'
-      busMarker.current = new maplibregl.Marker({ element: marker })
-        .setLngLat([bus.longitude, bus.latitude])
-        .addTo(currentMap)
+      const markerElement = document.createElement('div')
+      markerElement.className = 'bus-marker'
+      markerElement.innerHTML = '<span>BUS</span>'
+      busMarker.current = new maplibregl.Marker({ element: markerElement }).setLngLat(coordinate).addTo(currentMap)
     } else {
-      busMarker.current.setLngLat([bus.longitude, bus.latitude])
+      busMarker.current.setLngLat(coordinate)
     }
-  }, [bus])
+    if (screen === 'passenger-map' && followBus) currentMap.easeTo({ center: coordinate, duration: 700 })
+  }, [latestLocation, followBus, screen])
 
-  useEffect(() => () => {
-    if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current)
-  }, [])
-
-  async function publishLocation(coords: GeolocationCoordinates, active = true) {
-    const { error } = await supabase.from('bus_locations').upsert({
-      id: DRIVER_LOCATION_ID,
-      route_name: 'Ônibus em operação',
-      latitude: coords.latitude,
-      longitude: coords.longitude,
-      accuracy: coords.accuracy,
-      is_active: active,
-      updated_at: new Date().toISOString(),
-    })
-    if (error) setMessage('Não foi possível atualizar a localização do ônibus.')
-  }
-
-  function showPosition(publish = false) {
-    if (!navigator.geolocation) {
-      setMessage('Este navegador não oferece suporte ao GPS.')
+  useEffect(() => {
+    const currentMap = map.current
+    if (!currentMap || !passengerPosition) {
+      passengerMarker.current?.remove()
+      passengerMarker.current = null
       return
     }
-    navigator.geolocation.getCurrentPosition(async ({ coords }) => {
-      const currentMap = map.current
-      if (!currentMap) return
-      const position: [number, number] = [coords.longitude, coords.latitude]
-      currentMap.flyTo({ center: position, zoom: 16 })
-      if (!userMarker.current) {
-        const marker = document.createElement('div')
-        marker.className = 'user-marker'
-        userMarker.current = new maplibregl.Marker({ element: marker }).setLngLat(position).addTo(currentMap)
-      } else {
-        userMarker.current.setLngLat(position)
-      }
-      if (publish) await publishLocation(coords)
-    }, () => setMessage('Permita o acesso à localização para usar o mapa.'), {
-      enableHighAccuracy: true,
-      timeout: 15000,
-    })
-  }
-
-  async function toggleSharing() {
-    setMessage('')
-    if (sharing) {
-      if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current)
-      watchId.current = null
-      setSharing(false)
-      if (bus) {
-        await supabase.from('bus_locations').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', DRIVER_LOCATION_ID)
-      }
-      setBus(null)
-      return
+    if (!passengerMarker.current) {
+      const markerElement = document.createElement('div')
+      markerElement.className = 'user-marker'
+      passengerMarker.current = new maplibregl.Marker({ element: markerElement }).setLngLat(passengerPosition).addTo(currentMap)
+    } else {
+      passengerMarker.current.setLngLat(passengerPosition)
     }
-    showPosition(true)
-    watchId.current = navigator.geolocation.watchPosition(
-      ({ coords }) => { void publishLocation(coords) },
-      () => setMessage('Não foi possível manter o GPS ativo.'),
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 },
-    )
-    setSharing(true)
-  }
+  }, [passengerPosition])
 
-  function selectRole(selectedRole: Role) {
-    setRole(selectedRole)
-    setAuthMode('signin')
-    setMessage('')
-    setScreen('auth')
-  }
+  useEffect(() => {
+    if (screen !== 'passenger-map' || !isSupabaseConfigured) return
+    let cancelled = false
 
-  async function handleAuth(event: React.FormEvent) {
-    event.preventDefault()
-    setMessage('')
-    if (authMode === 'signup') {
-      const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { role } } })
+    const loadActiveTrip = async () => {
+      const { data: trip, error } = await supabase
+        .from('gps_bus_trips')
+        .select('*')
+        .eq('status', 'active')
+        .order('started_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (cancelled) return
       if (error) {
-        setMessage(error.message)
+        setMessage('Não foi possível consultar o ônibus agora.')
         return
       }
-      if (data.session) setScreen('map')
-      else setMessage('Cadastro realizado. Confirme o e-mail para entrar.')
-      return
+      setActiveTrip(trip)
+      activeTripRef.current = trip
+      if (!trip) {
+        setRouteLocations([])
+        return
+      }
+      const { data: locations } = await supabase
+        .from('gps_bus_locations')
+        .select('*')
+        .eq('trip_id', trip.id)
+        .order('recorded_at', { ascending: true })
+        .limit(MAX_ROUTE_POINTS)
+      if (!cancelled) setRouteLocations(locations || [])
     }
 
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) {
-      setMessage('E-mail ou senha inválidos.')
-      return
+    void loadActiveTrip()
+
+    const channel = supabase
+      .channel('gps-bus-passenger-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'gps_bus_trips' }, payload => {
+        const trip = payload.new as BusTrip
+        if (trip.status === 'active') {
+          if (activeTripRef.current?.id !== trip.id) setRouteLocations([])
+          activeTripRef.current = trip
+          setActiveTrip(trip)
+        } else if (activeTripRef.current?.id === trip.id) {
+          activeTripRef.current = null
+          setActiveTrip(null)
+        }
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'gps_bus_locations' }, payload => {
+        const location = payload.new as BusLocation
+        if (activeTripRef.current?.id !== location.trip_id) return
+        setRouteLocations(previous => [...previous.slice(-(MAX_ROUTE_POINTS - 1)), location])
+      })
+      .subscribe()
+
+    return () => {
+      cancelled = true
+      void supabase.removeChannel(channel)
     }
-    const savedRole = data.user.user_metadata?.role as Role | undefined
-    if (savedRole && savedRole !== role) {
-      await supabase.auth.signOut()
-      setMessage(`Esta conta foi cadastrada como ${savedRole === 'driver' ? 'motorista' : 'passageiro'}.`)
-      return
-    }
-    setScreen('map')
+  }, [screen])
+
+  useEffect(() => () => {
+    if (geolocationWatch.current !== null) navigator.geolocation.clearWatch(geolocationWatch.current)
+  }, [])
+
+  function clearGpsWatch() {
+    if (geolocationWatch.current !== null) navigator.geolocation.clearWatch(geolocationWatch.current)
+    geolocationWatch.current = null
   }
 
-  function leaveMap() {
-    if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current)
-    watchId.current = null
-    setSharing(false)
+  async function handleDriverLogin(event: React.FormEvent) {
+    event.preventDefault()
+    setMessage('')
+    if (!/^\d{6}$/.test(driverCode)) {
+      setMessage('Digite o código completo de 6 dígitos.')
+      return
+    }
+    if (!isSupabaseConfigured || !driverAuthEmail) {
+      setMessage('O Supabase do GPS BUS ainda precisa ser conectado.')
+      return
+    }
+
+    setBusy(true)
+    const { data, error } = await supabase.auth.signInWithPassword({ email: driverAuthEmail, password: driverCode })
+    if (error || !data.user) {
+      setBusy(false)
+      setMessage('Código incorreto. Verifique e tente novamente.')
+      return
+    }
+
+    const { data: profile, error: profileError } = await supabase
+      .from('gps_bus_drivers')
+      .select('user_id,bus_label,active')
+      .eq('user_id', data.user.id)
+      .maybeSingle()
+
+    if (profileError || !profile?.active) {
+      await supabase.auth.signOut()
+      setBusy(false)
+      setMessage('Este motorista não está autorizado.')
+      return
+    }
+
+    const { data: trip } = await supabase
+      .from('gps_bus_trips')
+      .select('*')
+      .eq('driver_id', data.user.id)
+      .eq('status', 'active')
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    setDriverProfile(profile)
+    setActiveTrip(trip)
+    if (trip) {
+      const { data: locations } = await supabase
+        .from('gps_bus_locations')
+        .select('*')
+        .eq('trip_id', trip.id)
+        .order('recorded_at', { ascending: true })
+        .limit(MAX_ROUTE_POINTS)
+      setRouteLocations(locations || [])
+    } else {
+      setRouteLocations([])
+    }
+    setBusy(false)
+    setScreen('driver-map')
+  }
+
+  async function recordDriverPosition(position: GeolocationPosition, trip: BusTrip, driverId: string, force = false) {
+    const coordinate: Coordinate = [position.coords.longitude, position.coords.latitude]
+    const now = Date.now()
+    const moved = lastSentPosition.current ? distanceInMeters(lastSentPosition.current, coordinate) : Number.POSITIVE_INFINITY
+    if (!force && now - lastSentAt.current < 2_500 && moved < 3) return
+
+    lastSentAt.current = now
+    lastSentPosition.current = coordinate
+    const location = {
+      trip_id: trip.id,
+      driver_id: driverId,
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracy: position.coords.accuracy,
+      speed: position.coords.speed,
+      heading: position.coords.heading,
+      recorded_at: new Date(position.timestamp).toISOString(),
+    }
+    const { data, error } = await supabase.from('gps_bus_locations').insert(location).select('*').single()
+    if (error) {
+      setMessage('Falha ao enviar o GPS. Verifique sua conexão.')
+      return
+    }
+    setRouteLocations(previous => [...previous.slice(-(MAX_ROUTE_POINTS - 1)), data])
+  }
+
+  async function startDriverTrip() {
+    if (!driverProfile || !navigator.geolocation) {
+      setMessage('O GPS não está disponível neste aparelho.')
+      return
+    }
+    setBusy(true)
+    setMessage('Solicitando acesso ao GPS…')
+    try {
+      const firstPosition = await getPosition()
+      let trip = activeTrip
+      if (!trip) {
+        const { data, error } = await supabase.from('gps_bus_trips').insert({
+          driver_id: driverProfile.user_id,
+          bus_label: driverProfile.bus_label,
+          status: 'active',
+        }).select('*').single()
+        if (error || !data) throw error || new Error('Trip was not created')
+        trip = data
+        setActiveTrip(trip)
+        setRouteLocations([])
+      }
+
+      const currentTrip = trip
+      if (!currentTrip) throw new Error('Trip is unavailable')
+      await recordDriverPosition(firstPosition, currentTrip, driverProfile.user_id, true)
+      clearGpsWatch()
+      geolocationWatch.current = navigator.geolocation.watchPosition(
+        position => { void recordDriverPosition(position, currentTrip, driverProfile.user_id) },
+        () => setMessage('O GPS foi interrompido. Mantenha a tela aberta e permita a localização.'),
+        { enableHighAccuracy: true, maximumAge: 2_000, timeout: 20_000 },
+      )
+      setDriverOnline(true)
+      setMessage('Ônibus ligado. Localização sendo transmitida ao vivo.')
+      map.current?.flyTo({ center: [firstPosition.coords.longitude, firstPosition.coords.latitude], zoom: 17 })
+    } catch {
+      setMessage('Não foi possível iniciar. Permita o GPS e tente novamente.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function finishDriverTrip() {
+    clearGpsWatch()
+    setDriverOnline(false)
+    if (activeTrip) {
+      await supabase.from('gps_bus_trips').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', activeTrip.id)
+    }
+    setActiveTrip(null)
+    setMessage('Viagem encerrada. O ônibus não está mais visível aos passageiros.')
+  }
+
+  function togglePassengerGps() {
+    setMessage('')
+    if (passengerGpsActive) {
+      clearGpsWatch()
+      setPassengerGpsActive(false)
+      setPassengerPosition(null)
+      return
+    }
+    if (!navigator.geolocation) {
+      setMessage('O GPS não está disponível neste aparelho.')
+      return
+    }
+    geolocationWatch.current = navigator.geolocation.watchPosition(
+      position => {
+        const coordinate: Coordinate = [position.coords.longitude, position.coords.latitude]
+        setPassengerPosition(coordinate)
+        if (!latestCoordinate) map.current?.flyTo({ center: coordinate, zoom: 16 })
+      },
+      () => setMessage('Permita o acesso à localização para ver sua posição.'),
+      { enableHighAccuracy: true, maximumAge: 3_000, timeout: 20_000 },
+    )
+    setPassengerGpsActive(true)
+  }
+
+  async function leaveDriverMap() {
+    if (driverOnline) await finishDriverTrip()
+    await supabase.auth.signOut()
+    setDriverProfile(null)
+    setDriverCode('')
+    setRouteLocations([])
+    setMessage('')
+    setScreen('home')
+  }
+
+  function leavePassengerMap() {
+    clearGpsWatch()
+    setPassengerGpsActive(false)
+    setPassengerPosition(null)
+    setRouteLocations([])
+    setActiveTrip(null)
+    setMessage('')
     setScreen('home')
   }
 
@@ -243,69 +463,77 @@ function App() {
         <section className="home-intro">
           <p className="eyebrow">LOCALIZAÇÃO EM TEMPO REAL</p>
           <h1>GPS BUS</h1>
-          <p className="subtitle">Rastreamento em tempo real</p>
+          <p className="subtitle">Seu ônibus no mapa, ao vivo</p>
         </section>
-
         <BusScene />
-
-        <section className="role-list" aria-label="Escolha como deseja entrar">
-          <button className="role-card" onClick={() => selectRole('driver')}>
+        <section className="role-list" aria-label="Escolha como deseja acessar">
+          <button className="role-card" onClick={() => { setMessage(''); setScreen('driver-login') }}>
             <RoleIcon role="driver" />
-            <span className="role-copy"><strong>Motorista</strong><small>Compartilhe a localização<br />do ônibus</small></span>
+            <span className="role-copy"><strong>Motorista</strong><small>Entre com seu código<br />e ligue o ônibus</small></span>
             <span className="chevron"><ChevronIcon /></span>
           </button>
-          <button className="role-card" onClick={() => selectRole('passenger')}>
+          <button className="role-card" onClick={() => { setMessage(''); setScreen('passenger-map') }}>
             <RoleIcon role="passenger" />
-            <span className="role-copy"><strong>Passageiro</strong><small>Acompanhe o ônibus<br />em tempo real</small></span>
+            <span className="role-copy"><strong>Passageiro</strong><small>Acesse direto, sem login,<br />e acompanhe o ônibus</small></span>
             <span className="chevron"><ChevronIcon /></span>
           </button>
         </section>
-
         <div className="home-divider"><span /></div>
-        <p className="home-description">Motorista compartilha a localização ao vivo.<br />Passageiro acompanha o ônibus e sua própria posição no mapa.</p>
-        <footer className="home-footer"><LocationIcon /><span>Tecnologia que conecta.<br />Viagem mais segura.</span></footer>
+        <p className="home-description">Somente a localização do ônibus é compartilhada.<br />A posição do passageiro permanece apenas no próprio aparelho.</p>
+        <footer className="home-footer"><LocationIcon /><span>Mapa gratuito OpenFreeMap.<br />Viagem mais segura.</span></footer>
       </main>
     )
   }
 
-  if (screen === 'auth') {
+  if (screen === 'driver-login') {
     return (
-      <main className="app-shell auth-screen">
+      <main className="app-shell auth-screen pin-screen">
         <header className="screen-header">
-          <button className="icon-button" onClick={() => setScreen('home')} aria-label="Voltar"><BackIcon /></button>
-          <span className="mini-brand">GPS BUS</span>
-          <span className="header-space" />
+          <button className="icon-button" onClick={() => { setMessage(''); setScreen('home') }} aria-label="Voltar"><BackIcon /></button>
+          <span className="mini-brand">GPS BUS</span><span className="header-space" />
         </header>
-
         <section className="auth-intro">
-          <RoleIcon role={role} />
-          <p className="eyebrow">{role === 'driver' ? 'ÁREA DO MOTORISTA' : 'ÁREA DO PASSAGEIRO'}</p>
-          <h1>{authMode === 'signin' ? 'Bem-vindo' : 'Criar conta'}</h1>
-          <p>{authMode === 'signin' ? 'Entre para acessar o GPS BUS.' : 'Cadastre-se para continuar com segurança.'}</p>
+          <RoleIcon role="driver" />
+          <p className="eyebrow">ACESSO DO MOTORISTA</p>
+          <h1>Ligar ônibus</h1>
+          <p>Digite o código de 6 dígitos para iniciar.</p>
         </section>
-
-        <form className="auth-card" onSubmit={handleAuth}>
-          <label>E-mail<input value={email} type="email" inputMode="email" autoComplete="email" placeholder="voce@exemplo.com" onChange={event => setEmail(event.target.value)} required /></label>
-          <label>Senha<input value={password} type="password" minLength={6} autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'} placeholder="Mínimo de 6 caracteres" onChange={event => setPassword(event.target.value)} required /></label>
+        <form className="auth-card pin-card" onSubmit={handleDriverLogin}>
+          <label htmlFor="driver-code">Código do motorista</label>
+          <input
+            id="driver-code"
+            className="pin-input"
+            value={driverCode}
+            type="password"
+            inputMode="numeric"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            autoComplete="one-time-code"
+            placeholder="••••••"
+            onChange={event => setDriverCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+            autoFocus
+            required
+          />
           {message && <p className="form-message" role="status">{message}</p>}
-          <button className="primary-button" type="submit">{authMode === 'signin' ? 'Entrar' : 'Criar minha conta'}<ChevronIcon /></button>
+          <button className="primary-button" type="submit" disabled={busy || driverCode.length !== 6}>
+            {busy ? 'Verificando…' : 'Entrar como motorista'}<ChevronIcon />
+          </button>
         </form>
-
-        <button className="text-button" onClick={() => { setAuthMode(authMode === 'signin' ? 'signup' : 'signin'); setMessage('') }}>
-          {authMode === 'signin' ? 'Ainda não tenho uma conta' : 'Já tenho uma conta'}
-        </button>
-        <p className="secure-copy">Acesso protegido. Não existe modo visitante.</p>
+        <p className="secure-copy">Código validado com segurança pelo Supabase.<br />Não compartilhe seu código.</p>
       </main>
     )
   }
+
+  const isDriver = screen === 'driver-map'
+  const busVisible = Boolean(activeTrip && latestLocation)
 
   return (
     <main className="app-shell map-screen">
       <div className="map" ref={mapContainer} />
       <header className="map-header floating-panel">
-        <button className="icon-button" onClick={leaveMap} aria-label="Voltar"><BackIcon /></button>
-        <div><span className="mini-brand">GPS BUS</span><small>Rastreamento em tempo real</small></div>
-        <span className="role-pill">{role === 'driver' ? 'MOTORISTA' : 'PASSAGEIRO'}</span>
+        <button className="icon-button" onClick={() => { void (isDriver ? leaveDriverMap() : Promise.resolve(leavePassengerMap())) }} aria-label="Voltar"><BackIcon /></button>
+        <div><span className="mini-brand">GPS BUS</span><small>{isDriver ? driverProfile?.bus_label || 'Motorista' : 'Acompanhamento ao vivo'}</small></div>
+        <span className="role-pill">{isDriver ? 'MOTORISTA' : 'PASSAGEIRO'}</span>
       </header>
 
       {message && <p className="map-message" role="status">{message}</p>}
@@ -314,21 +542,34 @@ function App() {
         <div className="sheet-handle" />
         <div className="bus-status">
           <span className="bus-status-icon">BUS</span>
-          <div><strong>{bus?.route_name || 'Aguardando ônibus'}</strong><small>{bus ? `Localização ativa • precisão ${Math.round(bus.accuracy || 0)} m` : 'Nenhuma localização compartilhada'}</small></div>
-          <i className={bus ? 'status-dot online' : 'status-dot'} />
+          <div>
+            <strong>{isDriver ? (driverOnline ? 'Ônibus ligado' : activeTrip ? 'Viagem pausada' : 'Ônibus desligado') : (busVisible ? activeTrip?.bus_label : 'Aguardando o ônibus')}</strong>
+            <small>{isDriver ? `${formatSpeed(latestLocation?.speed ?? null)} • ${routeLocations.length} pontos no trajeto` : (busVisible ? formatDistance(passengerDistance) : 'Nenhuma viagem ativa agora')}</small>
+          </div>
+          <i className={isDriver ? (driverOnline ? 'status-dot online' : 'status-dot') : (busVisible ? 'status-dot online' : 'status-dot')} />
         </div>
 
+        {isDriver && driverOnline && <p className="foreground-note">Mantenha esta tela aberta durante a viagem para o GPS continuar transmitindo.</p>}
+
         <div className="map-actions">
-          {role === 'driver' ? (
-            <button className={sharing ? 'danger-button' : 'primary-button'} onClick={() => void toggleSharing()}>
-              {sharing ? 'Parar rastreamento' : 'Iniciar rastreamento'}
+          {isDriver ? (
+            <button className={driverOnline ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => { void (driverOnline ? finishDriverTrip() : startDriverTrip()) }}>
+              {driverOnline ? 'Desligar ônibus' : activeTrip ? 'Retomar GPS' : 'Ligar e iniciar viagem'}
             </button>
           ) : (
-            <button className="primary-button" onClick={() => showPosition()}>Minha localização</button>
+            <button className={passengerGpsActive ? 'secondary-button active-control' : 'primary-button'} onClick={togglePassengerGps}>
+              {passengerGpsActive ? 'Desativar meu GPS' : 'Ativar minha localização'}
+            </button>
           )}
-          <button className="secondary-button" disabled={!bus} onClick={() => bus && map.current?.flyTo({ center: [bus.longitude, bus.latitude], zoom: 16 })}>
-            <LocationIcon /> Ver ônibus
-          </button>
+          <button
+            className="secondary-button"
+            disabled={!latestCoordinate}
+            onClick={() => {
+              if (!latestCoordinate) return
+              setFollowBus(true)
+              map.current?.flyTo({ center: latestCoordinate, zoom: 16 })
+            }}
+          ><LocationIcon /> {isDriver ? 'Centralizar' : followBus ? 'Seguindo ônibus' : 'Ver ônibus'}</button>
         </div>
       </section>
     </main>
