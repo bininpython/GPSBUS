@@ -99,6 +99,10 @@ button { color: inherit; }
 .home-description { margin: 0; text-align: center; font-size: 14px; line-height: 1.55; color: #292929; }
 .home-footer { margin-top: auto; padding-top: 22px; display: flex; flex-direction: column; align-items: center; gap: 6px; color: #969696; text-align: center; font-size: 12px; line-height: 1.35; }
 .home-footer svg { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-width: 2; }
+.developer-credit { margin: 10px 0 0; color: #a0a0a0; text-align: center; font-size: 10px; line-height: 1.2; letter-spacing: .035em; }
+.developer-credit strong { color: #616161; font-weight: 800; }
+.home-footer .developer-credit { margin-top: 7px; }
+.auth-credit { margin-top: 18px; }
 
 .screen-header {
   display: grid;
@@ -187,20 +191,29 @@ button { color: inherit; }
 .secure-copy { margin: 30px 0 0; text-align: center; color: #999; font-size: 12px; }
 
 .map-screen { height: 100dvh; }
-.map { position: absolute; inset: 0; background: #e8e8e8; }
-.map .maplibregl-canvas { filter: grayscale(1) contrast(.92) brightness(1.06); }
-.map .maplibregl-ctrl-bottom-right { bottom: 235px; right: 12px; }
-.map .maplibregl-ctrl-bottom-left { bottom: 226px; left: 10px; }
-.map .maplibregl-ctrl-attrib { max-width: 210px; font-size: 9px; opacity: .82; }
-.map .maplibregl-ctrl-group { border-radius: 14px; box-shadow: 0 5px 18px rgba(0,0,0,.14); overflow: hidden; }
+.map { position: absolute; z-index: 0; inset: 0; background: #e8e8e8; }
+.map.leaflet-container { font: inherit; }
+.map-state { position: absolute; z-index: 900; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; background: #ededed; color: #555; font-size: 13px; font-weight: 700; }
+.map-spinner { width: 18px; height: 18px; border: 2px solid #c8c8c8; border-top-color: #111; border-radius: 50%; animation: map-spin .8s linear infinite; }
+.map-state-error { padding: 130px 30px 250px; flex-direction: column; text-align: center; }
+.map-state-error strong { color: #111; font-size: 16px; }
+.map-state-error span { max-width: 260px; font-weight: 500; line-height: 1.45; }
+.map-state-error button { min-height: 42px; margin-top: 7px; padding: 0 18px; border: 1px solid #111; border-radius: 13px; background: #111; color: #fff; font-weight: 750; cursor: pointer; }
+@keyframes map-spin { to { transform: rotate(360deg); } }
+.map .leaflet-bottom { bottom: 250px; }
+.map .leaflet-right { right: 12px; }
+.map .leaflet-left { left: 10px; }
+.map .leaflet-control-attribution { max-width: 210px; font-size: 9px; opacity: .82; }
+.map .leaflet-control-zoom { border: 0; border-radius: 14px; box-shadow: 0 5px 18px rgba(0,0,0,.14); overflow: hidden; }
+.map .leaflet-control-zoom a { display: grid; place-items: center; width: 31px; height: 31px; border: 0; color: #111; font: 700 21px/1 inherit; }
 .floating-panel { border: 1px solid rgba(235,235,235,.95); background: rgba(255,255,255,.94); box-shadow: 0 12px 35px rgba(0,0,0,.13); backdrop-filter: blur(18px); }
-.map-header { position: absolute; z-index: 4; top: max(16px, env(safe-area-inset-top)); left: 14px; right: 14px; min-height: 72px; border-radius: 22px; padding: 12px; display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 10px; }
+.map-header { position: absolute; z-index: 1000; top: max(16px, env(safe-area-inset-top)); left: 14px; right: 14px; min-height: 72px; border-radius: 22px; padding: 12px; display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 10px; }
 .map-header > div { min-width: 0; }
 .map-header .mini-brand { display: block; text-align: left; }
 .map-header small { display: block; margin-top: 2px; color: #777; font-size: 11px; }
 .role-pill { padding: 7px 9px; border-radius: 9px; background: #111; color: #fff; font-size: 9px; font-weight: 800; letter-spacing: .08em; }
-.map-message { position: absolute; z-index: 5; top: 101px; left: 22px; right: 22px; margin: 0; padding: 12px 14px; border-radius: 14px; background: #111; color: #fff; text-align: center; font-size: 12px; box-shadow: 0 8px 20px rgba(0,0,0,.18); }
-.map-sheet { position: absolute; z-index: 4; left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); border-radius: 28px; padding: 11px 17px 17px; }
+.map-message { position: absolute; z-index: 1100; top: 101px; left: 22px; right: 22px; margin: 0; padding: 12px 14px; border-radius: 14px; background: #111; color: #fff; text-align: center; font-size: 12px; box-shadow: 0 8px 20px rgba(0,0,0,.18); }
+.map-sheet { position: absolute; z-index: 1000; left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); border-radius: 28px; padding: 11px 17px 17px; }
 .sheet-handle { width: 42px; height: 4px; border-radius: 4px; background: #d6d6d6; margin: 0 auto 14px; }
 .bus-status { display: grid; grid-template-columns: 52px 1fr 10px; align-items: center; gap: 12px; }
 .bus-status-icon { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 16px; background: #0a0a0a; color: #fff; font-size: 12px; font-weight: 900; letter-spacing: .06em; }
@@ -212,9 +225,10 @@ button { color: inherit; }
 .map-actions .primary-button, .map-actions .danger-button, .map-actions .secondary-button { min-height: 52px; padding: 0 12px; font-size: 13px; }
 .foreground-note { margin: 13px 0 0; padding: 9px 11px; border-radius: 11px; background: #f1f1f1; color: #565656; text-align: center; font-size: 10px; line-height: 1.35; }
 .active-control { background: #ededed; border-color: #d4d4d4; }
-.bus-marker { width: 52px; height: 52px; display: grid; place-items: center; border: 4px solid #fff; border-radius: 18px; background: #070707; color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,.25); font-size: 9px; font-weight: 900; }
+.map-credit { margin-top: 12px; }
+.bus-marker { box-sizing: border-box; width: 52px; height: 52px; display: grid; place-items: center; border: 4px solid #fff; border-radius: 18px; background: #070707; color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,.25); font-size: 9px; font-weight: 900; }
 .bus-marker span { display: grid; place-items: center; width: 100%; height: 100%; }
-.user-marker { width: 20px; height: 20px; border: 4px solid #fff; border-radius: 50%; background: #111; box-shadow: 0 0 0 4px rgba(0,0,0,.16), 0 4px 10px rgba(0,0,0,.25); }
+.user-marker { box-sizing: border-box; width: 20px; height: 20px; border: 4px solid #fff; border-radius: 50%; background: #111; box-shadow: 0 0 0 4px rgba(0,0,0,.16), 0 4px 10px rgba(0,0,0,.25); }
 
 @media (max-height: 760px) {
   .home-screen { padding-top: 26px; }

@@ -1,7 +1,5 @@
 import type { BusLocation, Coordinate } from '../types'
 
-export const OPEN_FREE_MAP_STYLE = 'https://tiles.openfreemap.org/styles/positron'
-
 export function toCoordinate(location: BusLocation): Coordinate {
   return [location.longitude, location.latitude]
 }
