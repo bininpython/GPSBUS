@@ -151,6 +151,18 @@ button { color: inherit; }
   font-size: 16px;
 }
 .auth-card input::placeholder { color: #a5a5a5; }
+.pin-card { text-align: center; }
+.pin-card > label { display: block; color: #5f5f5f; font-size: 12px; letter-spacing: .04em; }
+.pin-input {
+  height: 74px !important;
+  padding: 0 12px 0 22px !important;
+  background: #fff !important;
+  text-align: center;
+  font-size: 31px !important;
+  font-weight: 850;
+  letter-spacing: .42em;
+  font-variant-numeric: tabular-nums;
+}
 .form-message { margin: -3px 0 0; padding: 11px 13px; border-radius: 12px; background: #f3f3f3; color: #3d3d3d; font-size: 13px; line-height: 1.4; }
 .primary-button, .secondary-button, .danger-button {
   min-height: 54px;
@@ -165,6 +177,7 @@ button { color: inherit; }
   cursor: pointer;
 }
 .primary-button { border: 1px solid #080808; background: #080808; color: #fff; }
+.primary-button:disabled { opacity: .42; cursor: not-allowed; }
 .primary-button svg { width: 20px; height: 20px; margin-left: auto; }
 .secondary-button { border: 1px solid #cfcfcf; background: #fff; color: #090909; }
 .secondary-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; }
@@ -177,6 +190,8 @@ button { color: inherit; }
 .map { position: absolute; inset: 0; background: #e8e8e8; }
 .map .maplibregl-canvas { filter: grayscale(1) contrast(.92) brightness(1.06); }
 .map .maplibregl-ctrl-bottom-right { bottom: 235px; right: 12px; }
+.map .maplibregl-ctrl-bottom-left { bottom: 226px; left: 10px; }
+.map .maplibregl-ctrl-attrib { max-width: 210px; font-size: 9px; opacity: .82; }
 .map .maplibregl-ctrl-group { border-radius: 14px; box-shadow: 0 5px 18px rgba(0,0,0,.14); overflow: hidden; }
 .floating-panel { border: 1px solid rgba(235,235,235,.95); background: rgba(255,255,255,.94); box-shadow: 0 12px 35px rgba(0,0,0,.13); backdrop-filter: blur(18px); }
 .map-header { position: absolute; z-index: 4; top: max(16px, env(safe-area-inset-top)); left: 14px; right: 14px; min-height: 72px; border-radius: 22px; padding: 12px; display: grid; grid-template-columns: 44px 1fr auto; align-items: center; gap: 10px; }
@@ -195,8 +210,10 @@ button { color: inherit; }
 .status-dot.online { background: #1baf55; box-shadow: 0 0 0 4px rgba(27,175,85,.12); }
 .map-actions { display: grid; grid-template-columns: 1.25fr 1fr; gap: 9px; margin-top: 16px; }
 .map-actions .primary-button, .map-actions .danger-button, .map-actions .secondary-button { min-height: 52px; padding: 0 12px; font-size: 13px; }
-.bus-marker { width: 52px; height: 52px; display: grid; place-items: center; border: 4px solid #fff; border-radius: 18px 18px 18px 4px; transform: rotate(-45deg); background: #070707; color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,.25); font-size: 9px; font-weight: 900; }
-.bus-marker::first-line { transform: rotate(45deg); }
+.foreground-note { margin: 13px 0 0; padding: 9px 11px; border-radius: 11px; background: #f1f1f1; color: #565656; text-align: center; font-size: 10px; line-height: 1.35; }
+.active-control { background: #ededed; border-color: #d4d4d4; }
+.bus-marker { width: 52px; height: 52px; display: grid; place-items: center; border: 4px solid #fff; border-radius: 18px; background: #070707; color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,.25); font-size: 9px; font-weight: 900; }
+.bus-marker span { display: grid; place-items: center; width: 100%; height: 100%; }
 .user-marker { width: 20px; height: 20px; border: 4px solid #fff; border-radius: 50%; background: #111; box-shadow: 0 0 0 4px rgba(0,0,0,.16), 0 4px 10px rgba(0,0,0,.25); }
 
 @media (max-height: 760px) {
