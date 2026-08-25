@@ -1,6 +1,30 @@
 import type { BusLocation, Coordinate } from '../types'
+import type { StyleSpecification } from 'maplibre-gl'
 
 export const OPEN_FREE_MAP_STYLE = 'https://tiles.openfreemap.org/styles/positron'
+
+export const FALLBACK_RASTER_STYLE: StyleSpecification = {
+  version: 8,
+  sources: {
+    'openstreetmap-raster': {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      minzoom: 0,
+      maxzoom: 19,
+      attribution: '© OpenStreetMap contributors',
+    },
+  },
+  layers: [
+    {
+      id: 'openstreetmap-raster',
+      type: 'raster',
+      source: 'openstreetmap-raster',
+      minzoom: 0,
+      maxzoom: 20,
+    },
+  ],
+}
 
 export function toCoordinate(location: BusLocation): Coordinate {
   return [location.longitude, location.latitude]

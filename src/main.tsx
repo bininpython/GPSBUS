@@ -3,12 +3,13 @@ import { createRoot } from 'react-dom/client'
 import * as maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { driverAuthEmail, isSupabaseConfigured, supabase } from './lib/supabase'
-import { distanceInMeters, formatDistance, formatSpeed, OPEN_FREE_MAP_STYLE, toCoordinate } from './lib/location'
+import { distanceInMeters, FALLBACK_RASTER_STYLE, formatDistance, formatSpeed, OPEN_FREE_MAP_STYLE, toCoordinate } from './lib/location'
 import type { BusLocation, BusTrip, Coordinate, DriverProfile, Role, Screen } from './types'
 import './styles.css'
 
 const DEFAULT_CENTER: Coordinate = [-42.64, -19.58]
 const MAX_ROUTE_POINTS = 3_000
+type MapStatus = 'loading' | 'ready' | 'fallback' | 'error'
 
 function ChevronIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
@@ -59,6 +60,10 @@ function RoleIcon({ role }: { role: Role }) {
   return <span className="role-icon">{role === 'driver' ? <DriverIcon /> : <PassengerIcon />}</span>
 }
 
+function DeveloperCredit({ className = '' }: { className?: string }) {
+  return <p className={`developer-credit ${className}`.trim()}>developed by <strong>Abner Lucas</strong></p>
+}
+
 function routeGeoJson(coordinates: Coordinate[]) {
   const safeCoordinates: Coordinate[] = coordinates.length === 0
     ? [DEFAULT_CENTER, DEFAULT_CENTER]
@@ -93,6 +98,8 @@ function App() {
   const [passengerPosition, setPassengerPosition] = useState<Coordinate | null>(null)
   const [followBus, setFollowBus] = useState(true)
   const [mapLoaded, setMapLoaded] = useState(false)
+  const [mapStatus, setMapStatus] = useState<MapStatus>('loading')
+  const [mapAttempt, setMapAttempt] = useState(0)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -120,17 +127,21 @@ function App() {
     const isMapScreen = screen === 'driver-map' || screen === 'passenger-map'
     if (!isMapScreen || !mapContainer.current || map.current) return
 
-    const mapInstance = new maplibregl.Map({
-      container: mapContainer.current,
-      style: OPEN_FREE_MAP_STYLE,
-      center: DEFAULT_CENTER,
-      zoom: 13,
-      attributionControl: { compact: true },
-    })
-    map.current = mapInstance
-    mapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
+    const container = mapContainer.current
+    let mapInstance: maplibregl.Map | null = null
+    let destroyed = false
+    let fallbackEnabled = false
+    let styleReady = false
+    let mapRendered = false
+    let loadTimer: number | null = null
+    let resizeTimer: number | null = null
+    let resizeObserver: ResizeObserver | null = null
 
-    const handleLoad = () => {
+    setMapLoaded(false)
+    setMapStatus('loading')
+
+    const addRouteLayers = () => {
+      if (!mapInstance || mapInstance.getSource('bus-route')) return
       mapInstance.addSource('bus-route', { type: 'geojson', data: routeGeoJson([]) })
       mapInstance.addLayer({
         id: 'bus-route-outline',
@@ -146,16 +157,94 @@ function App() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': '#111111', 'line-width': 5, 'line-opacity': .92 },
       })
+    }
+
+    const activateFallback = () => {
+      if (!mapInstance || destroyed || fallbackEnabled) return
+      fallbackEnabled = true
+      styleReady = false
+      mapRendered = false
+      setMapLoaded(false)
+      setMapStatus('loading')
+      try {
+        mapInstance.setStyle(FALLBACK_RASTER_STYLE)
+        if (loadTimer !== null) window.clearTimeout(loadTimer)
+        loadTimer = window.setTimeout(() => {
+          if (!mapRendered) setMapStatus('error')
+        }, 8_000)
+      } catch (error) {
+        console.error('Falha ao ativar o mapa alternativo:', error)
+        setMapStatus('error')
+      }
+    }
+
+    const handleStyleLoad = () => {
+      if (!mapInstance || destroyed) return
+      styleReady = true
+      addRouteLayers()
+      mapInstance.resize()
       setMapLoaded(true)
     }
+
+    const handleMapIdle = () => {
+      if (destroyed || !styleReady) return
+      mapRendered = true
+      if (loadTimer !== null) window.clearTimeout(loadTimer)
+      setMapStatus(fallbackEnabled ? 'fallback' : 'ready')
+    }
+
+    const handleMapError = (event: maplibregl.ErrorEvent) => {
+      if (destroyed || mapRendered) return
+      console.error('Falha ao carregar o mapa:', event.error)
+      if (!fallbackEnabled) {
+        activateFallback()
+        return
+      }
+      setMapStatus('error')
+    }
+
+    try {
+      mapInstance = new maplibregl.Map({
+        container,
+        style: OPEN_FREE_MAP_STYLE,
+        center: DEFAULT_CENTER,
+        zoom: 13,
+        attributionControl: { compact: true },
+      })
+      map.current = mapInstance
+      mapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
+      mapInstance.on('style.load', handleStyleLoad)
+      mapInstance.on('idle', handleMapIdle)
+      mapInstance.on('error', handleMapError)
+
+      loadTimer = window.setTimeout(() => {
+        if (!mapRendered) activateFallback()
+      }, 8_000)
+      resizeTimer = window.setTimeout(() => mapInstance?.resize(), 120)
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => mapInstance?.resize())
+        resizeObserver.observe(container)
+      }
+    } catch (error) {
+      console.error('Este aparelho não conseguiu iniciar o mapa:', error)
+      map.current = null
+      setMapStatus('error')
+      return
+    }
+
     const handleManualMove = () => {
       if (screen === 'passenger-map') setFollowBus(false)
     }
-    mapInstance.on('load', handleLoad)
     mapInstance.on('dragstart', handleManualMove)
 
     return () => {
-      mapInstance.off('load', handleLoad)
+      destroyed = true
+      if (loadTimer !== null) window.clearTimeout(loadTimer)
+      if (resizeTimer !== null) window.clearTimeout(resizeTimer)
+      resizeObserver?.disconnect()
+      mapInstance?.off('style.load', handleStyleLoad)
+      mapInstance?.off('idle', handleMapIdle)
+      mapInstance?.off('error', handleMapError)
       mapInstance.off('dragstart', handleManualMove)
       mapInstance.remove()
       map.current = null
@@ -163,7 +252,7 @@ function App() {
       passengerMarker.current = null
       setMapLoaded(false)
     }
-  }, [screen])
+  }, [mapAttempt, screen])
 
   useEffect(() => {
     if (!mapLoaded || !map.current) return
@@ -235,9 +324,9 @@ function App() {
         .from('gps_bus_locations')
         .select('*')
         .eq('trip_id', trip.id)
-        .order('recorded_at', { ascending: true })
+        .order('recorded_at', { ascending: false })
         .limit(MAX_ROUTE_POINTS)
-      if (!cancelled) setRouteLocations(locations || [])
+      if (!cancelled) setRouteLocations([...(locations || [])].reverse())
     }
 
     void loadActiveTrip()
@@ -326,9 +415,9 @@ function App() {
         .from('gps_bus_locations')
         .select('*')
         .eq('trip_id', trip.id)
-        .order('recorded_at', { ascending: true })
+        .order('recorded_at', { ascending: false })
         .limit(MAX_ROUTE_POINTS)
-      setRouteLocations(locations || [])
+      setRouteLocations([...(locations || [])].reverse())
     } else {
       setRouteLocations([])
     }
@@ -480,7 +569,11 @@ function App() {
         </section>
         <div className="home-divider"><span /></div>
         <p className="home-description">Somente a localização do ônibus é compartilhada.<br />A posição do passageiro permanece apenas no próprio aparelho.</p>
-        <footer className="home-footer"><LocationIcon /><span>Mapa gratuito OpenFreeMap.<br />Viagem mais segura.</span></footer>
+        <footer className="home-footer">
+          <LocationIcon />
+          <span>Mapa gratuito OpenFreeMap.<br />Viagem mais segura.</span>
+          <DeveloperCredit />
+        </footer>
       </main>
     )
   }
@@ -520,6 +613,7 @@ function App() {
           </button>
         </form>
         <p className="secure-copy">Código validado com segurança pelo Supabase.<br />Não compartilhe seu código.</p>
+        <DeveloperCredit className="auth-credit" />
       </main>
     )
   }
@@ -529,7 +623,15 @@ function App() {
 
   return (
     <main className="app-shell map-screen">
-      <div className="map" ref={mapContainer} />
+      <div className="map" ref={mapContainer} role="region" aria-label="Mapa com a localização do ônibus" />
+      {mapStatus === 'loading' && <div className="map-state" role="status"><span className="map-spinner" />Carregando mapa…</div>}
+      {mapStatus === 'error' && (
+        <div className="map-state map-state-error" role="alert">
+          <strong>Não foi possível exibir o mapa.</strong>
+          <span>Verifique a conexão e tente novamente.</span>
+          <button type="button" onClick={() => setMapAttempt(attempt => attempt + 1)}>Tentar novamente</button>
+        </div>
+      )}
       <header className="map-header floating-panel">
         <button className="icon-button" onClick={() => { void (isDriver ? leaveDriverMap() : Promise.resolve(leavePassengerMap())) }} aria-label="Voltar"><BackIcon /></button>
         <div><span className="mini-brand">GPS BUS</span><small>{isDriver ? driverProfile?.bus_label || 'Motorista' : 'Acompanhamento ao vivo'}</small></div>
@@ -571,6 +673,7 @@ function App() {
             }}
           ><LocationIcon /> {isDriver ? 'Centralizar' : followBus ? 'Seguindo ônibus' : 'Ver ônibus'}</button>
         </div>
+        <DeveloperCredit className="map-credit" />
       </section>
     </main>
   )
