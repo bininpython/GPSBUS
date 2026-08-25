@@ -61,7 +61,7 @@ function RoleIcon({ role }: { role: Role }) {
 }
 
 function DeveloperCredit({ className = '' }: { className?: string }) {
-  return <p className={`developer-credit ${className}`.trim()}>developed by <strong>Abner Lucas</strong></p>
+  return <p className={`developer-credit ${className}`.trim()}>Developed by <strong>Abner Lucas</strong> and <strong>Sharles</strong></p>
 }
 
 function toLatLng(coordinate: Coordinate): L.LatLngTuple {
