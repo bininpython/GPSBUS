@@ -1,15 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import * as maplibregl from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
+import * as L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import { driverAuthEmail, isSupabaseConfigured, supabase } from './lib/supabase'
-import { distanceInMeters, FALLBACK_RASTER_STYLE, formatDistance, formatSpeed, OPEN_FREE_MAP_STYLE, toCoordinate } from './lib/location'
+import { distanceInMeters, formatDistance, formatSpeed, toCoordinate } from './lib/location'
 import type { BusLocation, BusTrip, Coordinate, DriverProfile, Role, Screen } from './types'
 import './styles.css'
 
 const DEFAULT_CENTER: Coordinate = [-42.64, -19.58]
 const MAX_ROUTE_POINTS = 3_000
-type MapStatus = 'loading' | 'ready' | 'fallback' | 'error'
+type MapStatus = 'loading' | 'ready' | 'error'
 
 function ChevronIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
@@ -64,17 +64,8 @@ function DeveloperCredit({ className = '' }: { className?: string }) {
   return <p className={`developer-credit ${className}`.trim()}>developed by <strong>Abner Lucas</strong></p>
 }
 
-function routeGeoJson(coordinates: Coordinate[]) {
-  const safeCoordinates: Coordinate[] = coordinates.length === 0
-    ? [DEFAULT_CENTER, DEFAULT_CENTER]
-    : coordinates.length === 1
-      ? [coordinates[0], coordinates[0]]
-      : coordinates
-  return {
-    type: 'Feature' as const,
-    properties: {},
-    geometry: { type: 'LineString' as const, coordinates: safeCoordinates },
-  }
+function toLatLng(coordinate: Coordinate): L.LatLngTuple {
+  return [coordinate[1], coordinate[0]]
 }
 
 function getPosition() {
@@ -104,9 +95,11 @@ function App() {
   const [busy, setBusy] = useState(false)
 
   const mapContainer = useRef<HTMLDivElement>(null)
-  const map = useRef<maplibregl.Map | null>(null)
-  const busMarker = useRef<maplibregl.Marker | null>(null)
-  const passengerMarker = useRef<maplibregl.Marker | null>(null)
+  const map = useRef<L.Map | null>(null)
+  const routeOutline = useRef<L.Polyline | null>(null)
+  const routeLine = useRef<L.Polyline | null>(null)
+  const busMarker = useRef<L.Marker | null>(null)
+  const passengerMarker = useRef<L.Marker | null>(null)
   const geolocationWatch = useRef<number | null>(null)
   const activeTripRef = useRef<BusTrip | null>(null)
   const lastSentAt = useRef(0)
@@ -128,11 +121,10 @@ function App() {
     if (!isMapScreen || !mapContainer.current || map.current) return
 
     const container = mapContainer.current
-    let mapInstance: maplibregl.Map | null = null
+    let mapInstance: L.Map | null = null
     let destroyed = false
-    let fallbackEnabled = false
-    let styleReady = false
     let mapRendered = false
+    let tileErrors = 0
     let loadTimer: number | null = null
     let resizeTimer: number | null = null
     let resizeObserver: ResizeObserver | null = null
@@ -140,89 +132,61 @@ function App() {
     setMapLoaded(false)
     setMapStatus('loading')
 
-    const addRouteLayers = () => {
-      if (!mapInstance || mapInstance.getSource('bus-route')) return
-      mapInstance.addSource('bus-route', { type: 'geojson', data: routeGeoJson([]) })
-      mapInstance.addLayer({
-        id: 'bus-route-outline',
-        type: 'line',
-        source: 'bus-route',
-        layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': .95 },
-      })
-      mapInstance.addLayer({
-        id: 'bus-route-line',
-        type: 'line',
-        source: 'bus-route',
-        layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': '#111111', 'line-width': 5, 'line-opacity': .92 },
-      })
-    }
-
-    const activateFallback = () => {
-      if (!mapInstance || destroyed || fallbackEnabled) return
-      fallbackEnabled = true
-      styleReady = false
-      mapRendered = false
-      setMapLoaded(false)
-      setMapStatus('loading')
-      try {
-        mapInstance.setStyle(FALLBACK_RASTER_STYLE)
-        if (loadTimer !== null) window.clearTimeout(loadTimer)
-        loadTimer = window.setTimeout(() => {
-          if (!mapRendered) setMapStatus('error')
-        }, 8_000)
-      } catch (error) {
-        console.error('Falha ao ativar o mapa alternativo:', error)
-        setMapStatus('error')
-      }
-    }
-
-    const handleStyleLoad = () => {
-      if (!mapInstance || destroyed) return
-      styleReady = true
-      addRouteLayers()
-      mapInstance.resize()
-      setMapLoaded(true)
-    }
-
-    const handleMapIdle = () => {
-      if (destroyed || !styleReady) return
+    const handleTileLoad = () => {
+      if (destroyed || mapRendered) return
       mapRendered = true
       if (loadTimer !== null) window.clearTimeout(loadTimer)
-      setMapStatus(fallbackEnabled ? 'fallback' : 'ready')
+      setMapLoaded(true)
+      setMapStatus('ready')
     }
 
-    const handleMapError = (event: maplibregl.ErrorEvent) => {
+    const handleTileError = (event: L.TileErrorEvent) => {
       if (destroyed || mapRendered) return
-      console.error('Falha ao carregar o mapa:', event.error)
-      if (!fallbackEnabled) {
-        activateFallback()
-        return
-      }
-      setMapStatus('error')
+      tileErrors += 1
+      console.error('Falha ao carregar um bloco do mapa:', event.error)
+      if (tileErrors >= 4) setMapStatus('error')
     }
 
     try {
-      mapInstance = new maplibregl.Map({
-        container,
-        style: OPEN_FREE_MAP_STYLE,
-        center: DEFAULT_CENTER,
+      mapInstance = L.map(container, {
+        center: toLatLng(DEFAULT_CENTER),
         zoom: 13,
-        attributionControl: { compact: true },
+        zoomControl: false,
+        attributionControl: true,
       })
       map.current = mapInstance
-      mapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right')
-      mapInstance.on('style.load', handleStyleLoad)
-      mapInstance.on('idle', handleMapIdle)
-      mapInstance.on('error', handleMapError)
+      L.control.zoom({ position: 'bottomright' }).addTo(mapInstance)
+
+      const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+        maxZoom: 19,
+        crossOrigin: true,
+      })
+      tiles.on('tileload', handleTileLoad)
+      tiles.on('tileerror', handleTileError)
+      tiles.addTo(mapInstance)
+
+      routeOutline.current = L.polyline([], {
+        color: '#ffffff',
+        weight: 9,
+        opacity: .95,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(mapInstance)
+      routeLine.current = L.polyline([], {
+        color: '#111111',
+        weight: 5,
+        opacity: .92,
+        lineCap: 'round',
+        lineJoin: 'round',
+      }).addTo(mapInstance)
 
       loadTimer = window.setTimeout(() => {
-        if (!mapRendered) activateFallback()
-      }, 8_000)
-      resizeTimer = window.setTimeout(() => mapInstance?.resize(), 120)
+        if (!mapRendered) setMapStatus('error')
+      }, 10_000)
+      resizeTimer = window.setTimeout(() => mapInstance?.invalidateSize(), 120)
       if (typeof ResizeObserver !== 'undefined') {
-        resizeObserver = new ResizeObserver(() => mapInstance?.resize())
+        resizeObserver = new ResizeObserver(() => mapInstance?.invalidateSize({ pan: false }))
         resizeObserver.observe(container)
       }
     } catch (error) {
@@ -242,12 +206,11 @@ function App() {
       if (loadTimer !== null) window.clearTimeout(loadTimer)
       if (resizeTimer !== null) window.clearTimeout(resizeTimer)
       resizeObserver?.disconnect()
-      mapInstance?.off('style.load', handleStyleLoad)
-      mapInstance?.off('idle', handleMapIdle)
-      mapInstance?.off('error', handleMapError)
       mapInstance.off('dragstart', handleManualMove)
       mapInstance.remove()
       map.current = null
+      routeOutline.current = null
+      routeLine.current = null
       busMarker.current = null
       passengerMarker.current = null
       setMapLoaded(false)
@@ -256,9 +219,9 @@ function App() {
 
   useEffect(() => {
     if (!mapLoaded || !map.current) return
-    const coordinates = routeLocations.map(toCoordinate)
-    const source = map.current.getSource('bus-route') as maplibregl.GeoJSONSource | undefined
-    void source?.setData(routeGeoJson(coordinates))
+    const coordinates = routeLocations.map(location => toLatLng(toCoordinate(location)))
+    routeOutline.current?.setLatLngs(coordinates)
+    routeLine.current?.setLatLngs(coordinates)
   }, [mapLoaded, routeLocations])
 
   useEffect(() => {
@@ -270,14 +233,13 @@ function App() {
     }
     const coordinate = toCoordinate(latestLocation)
     if (!busMarker.current) {
-      const markerElement = document.createElement('div')
-      markerElement.className = 'bus-marker'
-      markerElement.innerHTML = '<span>BUS</span>'
-      busMarker.current = new maplibregl.Marker({ element: markerElement }).setLngLat(coordinate).addTo(currentMap)
+      busMarker.current = L.marker(toLatLng(coordinate), {
+        icon: L.divIcon({ className: 'bus-marker', html: '<span>BUS</span>', iconSize: [52, 52], iconAnchor: [26, 26] }),
+      }).addTo(currentMap)
     } else {
-      busMarker.current.setLngLat(coordinate)
+      busMarker.current.setLatLng(toLatLng(coordinate))
     }
-    if (screen === 'passenger-map' && followBus) currentMap.easeTo({ center: coordinate, duration: 700 })
+    if (screen === 'passenger-map' && followBus) currentMap.flyTo(toLatLng(coordinate), currentMap.getZoom(), { duration: .7 })
   }, [latestLocation, followBus, screen])
 
   useEffect(() => {
@@ -288,11 +250,11 @@ function App() {
       return
     }
     if (!passengerMarker.current) {
-      const markerElement = document.createElement('div')
-      markerElement.className = 'user-marker'
-      passengerMarker.current = new maplibregl.Marker({ element: markerElement }).setLngLat(passengerPosition).addTo(currentMap)
+      passengerMarker.current = L.marker(toLatLng(passengerPosition), {
+        icon: L.divIcon({ className: 'user-marker', iconSize: [20, 20], iconAnchor: [10, 10] }),
+      }).addTo(currentMap)
     } else {
-      passengerMarker.current.setLngLat(passengerPosition)
+      passengerMarker.current.setLatLng(toLatLng(passengerPosition))
     }
   }, [passengerPosition])
 
@@ -484,7 +446,7 @@ function App() {
       )
       setDriverOnline(true)
       setMessage('Ônibus ligado. Localização sendo transmitida ao vivo.')
-      map.current?.flyTo({ center: [firstPosition.coords.longitude, firstPosition.coords.latitude], zoom: 17 })
+      map.current?.flyTo([firstPosition.coords.latitude, firstPosition.coords.longitude], 17)
     } catch {
       setMessage('Não foi possível iniciar. Permita o GPS e tente novamente.')
     } finally {
@@ -518,7 +480,7 @@ function App() {
       position => {
         const coordinate: Coordinate = [position.coords.longitude, position.coords.latitude]
         setPassengerPosition(coordinate)
-        if (!latestCoordinate) map.current?.flyTo({ center: coordinate, zoom: 16 })
+        if (!latestCoordinate) map.current?.flyTo(toLatLng(coordinate), 16)
       },
       () => setMessage('Permita o acesso à localização para ver sua posição.'),
       { enableHighAccuracy: true, maximumAge: 3_000, timeout: 20_000 },
@@ -571,7 +533,7 @@ function App() {
         <p className="home-description">Somente a localização do ônibus é compartilhada.<br />A posição do passageiro permanece apenas no próprio aparelho.</p>
         <footer className="home-footer">
           <LocationIcon />
-          <span>Mapa gratuito OpenFreeMap.<br />Viagem mais segura.</span>
+          <span>Mapa gratuito OpenStreetMap.<br />Viagem mais segura.</span>
           <DeveloperCredit />
         </footer>
       </main>
@@ -669,7 +631,7 @@ function App() {
             onClick={() => {
               if (!latestCoordinate) return
               setFollowBus(true)
-              map.current?.flyTo({ center: latestCoordinate, zoom: 16 })
+              map.current?.flyTo(toLatLng(latestCoordinate), 16)
             }}
           ><LocationIcon /> {isDriver ? 'Centralizar' : followBus ? 'Seguindo ônibus' : 'Ver ônibus'}</button>
         </div>
