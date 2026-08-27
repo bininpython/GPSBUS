@@ -9,7 +9,15 @@ import './styles.css'
 
 const DEFAULT_CENTER: Coordinate = [-42.64, -19.58]
 const MAX_ROUTE_POINTS = 3_000
+const BUS_LOCATION_STALE_AFTER_MS = 90_000
+const DRIVER_HEARTBEAT_INTERVAL_MS = 20_000
 type MapStatus = 'loading' | 'ready' | 'error'
+
+function isFreshLocation(location: BusLocation | null, now: number) {
+  if (!location) return false
+  const recordedAt = Date.parse(location.recorded_at)
+  return Number.isFinite(recordedAt) && now - recordedAt <= BUS_LOCATION_STALE_AFTER_MS
+}
 
 function ChevronIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
@@ -93,6 +101,7 @@ function App() {
   const [mapAttempt, setMapAttempt] = useState(0)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
+  const [currentTime, setCurrentTime] = useState(() => Date.now())
 
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<L.Map | null>(null)
@@ -101,12 +110,17 @@ function App() {
   const busMarker = useRef<L.Marker | null>(null)
   const passengerMarker = useRef<L.Marker | null>(null)
   const geolocationWatch = useRef<number | null>(null)
+  const driverHeartbeat = useRef<number | null>(null)
   const activeTripRef = useRef<BusTrip | null>(null)
   const lastSentAt = useRef(0)
   const lastSentPosition = useRef<Coordinate | null>(null)
 
   const latestLocation = routeLocations.length ? routeLocations[routeLocations.length - 1] : null
-  const latestCoordinate = latestLocation ? toCoordinate(latestLocation) : null
+  const isDriver = screen === 'driver-map'
+  const passengerBusVisible = Boolean(activeTrip && isFreshLocation(latestLocation, currentTime))
+  const visibleLatestLocation = isDriver || passengerBusVisible ? latestLocation : null
+  const visibleRouteLocations = isDriver || passengerBusVisible ? routeLocations : []
+  const latestCoordinate = visibleLatestLocation ? toCoordinate(visibleLatestLocation) : null
   const passengerDistance = useMemo(() => {
     if (!passengerPosition || !latestCoordinate) return null
     return distanceInMeters(passengerPosition, latestCoordinate)
@@ -115,6 +129,13 @@ function App() {
   useEffect(() => {
     activeTripRef.current = activeTrip
   }, [activeTrip])
+
+  useEffect(() => {
+    if (screen !== 'passenger-map') return
+    setCurrentTime(Date.now())
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 10_000)
+    return () => window.clearInterval(timer)
+  }, [screen])
 
   useEffect(() => {
     const isMapScreen = screen === 'driver-map' || screen === 'passenger-map'
@@ -219,19 +240,19 @@ function App() {
 
   useEffect(() => {
     if (!mapLoaded || !map.current) return
-    const coordinates = routeLocations.map(location => toLatLng(toCoordinate(location)))
+    const coordinates = visibleRouteLocations.map(location => toLatLng(toCoordinate(location)))
     routeOutline.current?.setLatLngs(coordinates)
     routeLine.current?.setLatLngs(coordinates)
-  }, [mapLoaded, routeLocations])
+  }, [mapLoaded, visibleRouteLocations])
 
   useEffect(() => {
     const currentMap = map.current
-    if (!currentMap || !latestLocation) {
+    if (!currentMap || !visibleLatestLocation) {
       busMarker.current?.remove()
       busMarker.current = null
       return
     }
-    const coordinate = toCoordinate(latestLocation)
+    const coordinate = toCoordinate(visibleLatestLocation)
     if (!busMarker.current) {
       busMarker.current = L.marker(toLatLng(coordinate), {
         icon: L.divIcon({ className: 'bus-marker', html: '<span>BUS</span>', iconSize: [52, 52], iconAnchor: [26, 26] }),
@@ -240,7 +261,7 @@ function App() {
       busMarker.current.setLatLng(toLatLng(coordinate))
     }
     if (screen === 'passenger-map' && followBus) currentMap.flyTo(toLatLng(coordinate), currentMap.getZoom(), { duration: .7 })
-  }, [latestLocation, followBus, screen])
+  }, [visibleLatestLocation, followBus, screen])
 
   useEffect(() => {
     const currentMap = map.current
@@ -288,7 +309,10 @@ function App() {
         .eq('trip_id', trip.id)
         .order('recorded_at', { ascending: false })
         .limit(MAX_ROUTE_POINTS)
-      if (!cancelled) setRouteLocations([...(locations || [])].reverse())
+      if (!cancelled) {
+        setRouteLocations([...(locations || [])].reverse())
+        setCurrentTime(Date.now())
+      }
     }
 
     void loadActiveTrip()
@@ -304,6 +328,8 @@ function App() {
         } else if (activeTripRef.current?.id === trip.id) {
           activeTripRef.current = null
           setActiveTrip(null)
+          setRouteLocations([])
+          setFollowBus(true)
         }
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'gps_bus_locations' }, payload => {
@@ -313,19 +339,34 @@ function App() {
       })
       .subscribe()
 
+    const refreshTimer = window.setInterval(() => { void loadActiveTrip() }, 30_000)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void loadActiveTrip()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
     return () => {
       cancelled = true
+      window.clearInterval(refreshTimer)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       void supabase.removeChannel(channel)
     }
   }, [screen])
 
   useEffect(() => () => {
     if (geolocationWatch.current !== null) navigator.geolocation.clearWatch(geolocationWatch.current)
+    if (driverHeartbeat.current !== null) window.clearInterval(driverHeartbeat.current)
   }, [])
 
   function clearGpsWatch() {
     if (geolocationWatch.current !== null) navigator.geolocation.clearWatch(geolocationWatch.current)
     geolocationWatch.current = null
+  }
+
+  function clearDriverTracking() {
+    clearGpsWatch()
+    if (driverHeartbeat.current !== null) window.clearInterval(driverHeartbeat.current)
+    driverHeartbeat.current = null
   }
 
   async function handleDriverLogin(event: React.FormEvent) {
@@ -372,6 +413,7 @@ function App() {
 
     setDriverProfile(profile)
     setActiveTrip(trip)
+    activeTripRef.current = trip
     if (trip) {
       const { data: locations } = await supabase
         .from('gps_bus_locations')
@@ -388,6 +430,7 @@ function App() {
   }
 
   async function recordDriverPosition(position: GeolocationPosition, trip: BusTrip, driverId: string, force = false) {
+    if (activeTripRef.current?.id !== trip.id) return
     const coordinate: Coordinate = [position.coords.longitude, position.coords.latitude]
     const now = Date.now()
     const moved = lastSentPosition.current ? distanceInMeters(lastSentPosition.current, coordinate) : Number.POSITIVE_INFINITY
@@ -407,9 +450,10 @@ function App() {
     }
     const { data, error } = await supabase.from('gps_bus_locations').insert(location).select('*').single()
     if (error) {
-      setMessage('Falha ao enviar o GPS. Verifique sua conexão.')
+      if (activeTripRef.current?.id === trip.id) setMessage('Falha ao enviar o GPS. Verifique sua conexão.')
       return
     }
+    if (activeTripRef.current?.id !== trip.id) return
     setRouteLocations(previous => [...previous.slice(-(MAX_ROUTE_POINTS - 1)), data])
   }
 
@@ -432,18 +476,24 @@ function App() {
         if (error || !data) throw error || new Error('Trip was not created')
         trip = data
         setActiveTrip(trip)
+        activeTripRef.current = trip
         setRouteLocations([])
       }
 
       const currentTrip = trip
       if (!currentTrip) throw new Error('Trip is unavailable')
       await recordDriverPosition(firstPosition, currentTrip, driverProfile.user_id, true)
-      clearGpsWatch()
+      clearDriverTracking()
       geolocationWatch.current = navigator.geolocation.watchPosition(
         position => { void recordDriverPosition(position, currentTrip, driverProfile.user_id) },
         () => setMessage('O GPS foi interrompido. Mantenha a tela aberta e permita a localização.'),
         { enableHighAccuracy: true, maximumAge: 2_000, timeout: 20_000 },
       )
+      driverHeartbeat.current = window.setInterval(() => {
+        void getPosition()
+          .then(position => recordDriverPosition(position, currentTrip, driverProfile.user_id, true))
+          .catch(() => undefined)
+      }, DRIVER_HEARTBEAT_INTERVAL_MS)
       setDriverOnline(true)
       setMessage('Ônibus ligado. Localização sendo transmitida ao vivo.')
       map.current?.flyTo([firstPosition.coords.latitude, firstPosition.coords.longitude], 17)
@@ -455,13 +505,32 @@ function App() {
   }
 
   async function finishDriverTrip() {
-    clearGpsWatch()
+    const tripToFinish = activeTripRef.current
+    if (!tripToFinish || busy) return
+
+    clearDriverTracking()
     setDriverOnline(false)
-    if (activeTrip) {
-      await supabase.from('gps_bus_trips').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', activeTrip.id)
+    activeTripRef.current = null
+    setBusy(true)
+    setMessage('Encerrando corrida…')
+
+    const { error } = await supabase
+      .from('gps_bus_trips')
+      .update({ status: 'ended', ended_at: new Date().toISOString() })
+      .eq('id', tripToFinish.id)
+      .eq('driver_id', tripToFinish.driver_id)
+      .eq('status', 'active')
+
+    setBusy(false)
+    if (error) {
+      activeTripRef.current = tripToFinish
+      setMessage('Não foi possível encerrar a corrida. Verifique a conexão e tente novamente.')
+      return
     }
+
     setActiveTrip(null)
-    setMessage('Viagem encerrada. O ônibus não está mais visível aos passageiros.')
+    setRouteLocations([])
+    setMessage('Corrida encerrada. GPS desligado e ônibus removido do mapa dos passageiros.')
   }
 
   function togglePassengerGps() {
@@ -489,7 +558,8 @@ function App() {
   }
 
   async function leaveDriverMap() {
-    if (driverOnline) await finishDriverTrip()
+    if (activeTripRef.current) await finishDriverTrip()
+    if (activeTripRef.current) return
     await supabase.auth.signOut()
     setDriverProfile(null)
     setDriverCode('')
@@ -580,9 +650,6 @@ function App() {
     )
   }
 
-  const isDriver = screen === 'driver-map'
-  const busVisible = Boolean(activeTrip && latestLocation)
-
   return (
     <main className="app-shell map-screen">
       <div className="map" ref={mapContainer} role="region" aria-label="Mapa com a localização do ônibus" />
@@ -607,19 +674,28 @@ function App() {
         <div className="bus-status">
           <span className="bus-status-icon">BUS</span>
           <div>
-            <strong>{isDriver ? (driverOnline ? 'Ônibus ligado' : activeTrip ? 'Viagem pausada' : 'Ônibus desligado') : (busVisible ? activeTrip?.bus_label : 'Aguardando o ônibus')}</strong>
-            <small>{isDriver ? `${formatSpeed(latestLocation?.speed ?? null)} • ${routeLocations.length} pontos no trajeto` : (busVisible ? formatDistance(passengerDistance) : 'Nenhuma viagem ativa agora')}</small>
+            <strong>{isDriver ? (driverOnline ? 'Corrida em andamento' : activeTrip ? 'GPS pausado' : 'Nenhuma corrida ativa') : (passengerBusVisible ? activeTrip?.bus_label : 'Aguardando o ônibus')}</strong>
+            <small>{isDriver ? `${formatSpeed(latestLocation?.speed ?? null)} • ${routeLocations.length} pontos no trajeto` : (passengerBusVisible ? formatDistance(passengerDistance) : 'Nenhuma viagem ativa agora')}</small>
           </div>
-          <i className={isDriver ? (driverOnline ? 'status-dot online' : 'status-dot') : (busVisible ? 'status-dot online' : 'status-dot')} />
+          <i className={isDriver ? (driverOnline ? 'status-dot online' : 'status-dot') : (passengerBusVisible ? 'status-dot online' : 'status-dot')} />
         </div>
 
-        {isDriver && driverOnline && <p className="foreground-note">Mantenha esta tela aberta durante a viagem para o GPS continuar transmitindo.</p>}
+        {isDriver && activeTrip && <p className="foreground-note">{driverOnline ? 'Mantenha esta tela aberta durante a corrida. Para finalizar, toque em “Encerrar corrida e desligar GPS”.' : 'O GPS está pausado. Retome a transmissão ou encerre a corrida para remover o ônibus dos passageiros.'}</p>}
 
         <div className="map-actions">
           {isDriver ? (
-            <button className={driverOnline ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => { void (driverOnline ? finishDriverTrip() : startDriverTrip()) }}>
-              {driverOnline ? 'Desligar ônibus' : activeTrip ? 'Retomar GPS' : 'Ligar e iniciar viagem'}
-            </button>
+            <>
+              {!driverOnline && (
+                <button className="primary-button" disabled={busy} onClick={() => { void startDriverTrip() }}>
+                  {activeTrip ? 'Retomar GPS' : 'Iniciar corrida'}
+                </button>
+              )}
+              {activeTrip && (
+                <button className="danger-button" disabled={busy} onClick={() => { void finishDriverTrip() }}>
+                  {busy ? 'Encerrando…' : 'Encerrar corrida e desligar GPS'}
+                </button>
+              )}
+            </>
           ) : (
             <button className={passengerGpsActive ? 'secondary-button active-control' : 'primary-button'} onClick={togglePassengerGps}>
               {passengerGpsActive ? 'Desativar meu GPS' : 'Ativar minha localização'}
